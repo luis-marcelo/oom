@@ -1,0 +1,223 @@
+# Copyright © 2017 Amdocs, Bell Canada
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: {{ include "common.fullname" . }}
+  namespace: {{ include "common.namespace" . }}
+  labels:
+    app: {{ include "common.name" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ .Values.config.dmaapDrNode.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "common.name" . }}
+        release: {{ .Release.Name }}
+    spec:
+      initContainers:
+        - name: {{ include "common.name" . }}-readiness
+          image: "{{ .Values.global.readinessRepository }}/{{ .Values.global.readinessImage }}"
+          imagePullPolicy: {{ .Values.global.pullPolicy | default .Values.pullPolicy }}
+          command:
+          - /root/ready.py
+          args:
+          - --container-name
+          - dmaap-dr-prov
+          env:
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: metadata.namespace
+        {{- if .Values.global.aafEnabled }}
+        - name: {{ include "common.name" . }}-dr-node-aaf-config
+          image: "{{ include "common.repository" . }}/{{ .Values.global.aafAgentImage }}"
+          imagePullPolicy: {{ .Values.global.pullPolicy | default .Values.pullPolicy }}
+          volumeMounts:
+          - mountPath: {{ .Values.persistence.aafCredsPath }}
+            name: {{ include "common.fullname" . }}-aaf-props-pvc
+          command: ["bash","-c","exec /opt/app/aaf_config/bin/agent.sh"]
+          env:
+          - name: APP_FQI
+            value: "{{ .Values.aafConfig.fqi }}"
+          - name: aaf_locate_url
+            value: "https://aaf-locate.{{ .Release.Namespace }}:8095"
+          - name: aaf_locator_container
+            value: "{{ .Values.global.aafLocatorContainer }}"
+          - name: aaf_locator_container_ns
+            value: "{{ .Release.Namespace }}"
+          - name: aaf_locator_fqdn
+            value: "{{ .Values.aafConfig.fqdn }}"
+          - name: aaf_locator_public_fqdn
+            value: "{{.Values.aafConfig.publicFqdn}}"
+          - name: aaf_locator_app_ns
+            value: "{{ .Values.global.aafAppNs }}"
+          - name: DEPLOY_FQI
+            value: "{{ .Values.aafConfig.aafDeployFqi }}"
+          - name: DEPLOY_PASSWORD
+            value: "{{ .Values.aafConfig.aafDeployPass }}"
+          - name: cadi_longitude
+            value: "{{ .Values.aafConfig.cadiLongitude }}"
+          - name: cadi_latitude
+            value: "{{ .Values.aafConfig.cadiLatitude }}"
+        {{- end }}
+        - name: {{ include "common.name" . }}-permission-fixer
+          image: "{{ .Values.global.busyBoxRepository }}/{{ .Values.global.busyBoxImage }}"
+          imagePullPolicy: {{ .Values.global.pullPolicy | default .Values.pullPolicy }}
+          volumeMounts:
+          - mountPath: {{ .Values.persistence.spoolPath }}
+            name: {{ include "common.fullname" . }}-spool-data-pvc
+          - mountPath: {{ .Values.persistence.eventLogsPath }}
+            name: {{ include "common.fullname" . }}-event-logs-pvc
+        {{- if .Values.global.aafEnabled }}
+          - mountPath: {{ .Values.persistence.aafCredsPath }}
+            name: {{ include "common.fullname" . }}-aaf-props-pvc
+        {{- end }}
+          command: ["chown","-Rf","1000:1001", "/opt/app/"]
+      containers:
+        - name: {{ include "common.name" . }}
+          image: "{{ include "common.repository" . }}/{{ .Values.image }}"
+          imagePullPolicy: {{ .Values.global.pullPolicy | default .Values.pullPolicy }}
+          ports:
+          - containerPort: {{.Values.config.dmaapDrNode.externalPort}}
+          - containerPort: {{.Values.config.dmaapDrNode.externalPort2}}
+          {{- if eq .Values.liveness.enabled true }}
+          livenessProbe:
+            tcpSocket:
+              port: {{.Values.config.dmaapDrNode.internalPort}}
+            initialDelaySeconds: {{ .Values.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.liveness.periodSeconds }}
+          {{ end -}}
+          readinessProbe:
+            tcpSocket:
+              port: {{.Values.config.dmaapDrNode.internalPort}}
+            initialDelaySeconds: {{ .Values.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readiness.periodSeconds }}
+          volumeMounts:
+          {{- if .Values.global.aafEnabled }}
+          - mountPath: {{ .Values.persistence.aafCredsPath }}
+            name: {{ include "common.fullname" . }}-aaf-props-pvc
+          {{- end }}
+          - mountPath: {{ .Values.persistence.spoolPath }}
+            name: {{ include "common.fullname" . }}-spool-data-pvc
+          - mountPath: {{ .Values.persistence.eventLogsPath }}
+            name: {{ include "common.fullname" . }}-event-logs-pvc
+          - mountPath: /etc/localtime
+            name: localtime
+            readOnly: false
+          - mountPath: /opt/app/datartr/etc/node.properties
+            name: {{ include "common.fullname" . }}-config
+            subPath: node.properties
+          - mountPath: /opt/app/datartr/etc/logback.xml
+            name: {{ include "common.fullname" . }}-log-conf
+            subPath: logback.xml
+          - mountPath: {{ .Values.global.loggingDirectory }}
+            name: {{ include "common.fullname" . }}-logs
+          resources:
+{{ include "common.resources" . }}
+        {{- if .Values.nodeSelector }}
+        nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 10 }}
+        {{- end -}}
+        {{- if .Values.affinity }}
+        affinity:
+{{ toYaml .Values.affinity | indent 10 }}
+        {{- end -}}
+      # Filebeat sidecar container
+        - name: {{ include "common.name" . }}-filebeat-onap
+          image: "{{ .Values.global.loggingRepository }}/{{ .Values.global.loggingImage }}"
+          imagePullPolicy: {{ .Values.global.pullPolicy | default .Values.pullPolicy }}
+          volumeMounts:
+          - name: {{ include "common.fullname" . }}-filebeat-conf
+            mountPath: /usr/share/filebeat/filebeat.yml
+            subPath: filebeat.yml
+          - name: {{ include "common.fullname" . }}-data-filebeat
+            mountPath: /usr/share/filebeat/data
+          - name: {{ include "common.fullname" . }}-logs
+            mountPath: /var/log/onap/datarouter-node
+      imagePullSecrets:
+      - name: "{{ include "common.namespace" . }}-docker-registry-key"
+      volumes:
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+        - name: {{ include "common.fullname" . }}-config
+          configMap:
+            name: {{ include "common.fullname" . }}-configmap
+            items:
+            - key: node.properties
+              path: node.properties
+        - name: {{ include "common.fullname" . }}-log-conf
+          configMap:
+            name: {{ include "common.fullname" . }}-log
+        - name: {{ include "common.fullname" . }}-filebeat-conf
+          configMap:
+            name: {{ include "common.fullname" . }}-dmaap-dr-node-filebeat-configmap
+        - name: {{ include "common.fullname" . }}-data-filebeat
+          emptyDir: {}
+        - name:  {{ include "common.fullname" . }}-event-logs-pvc
+          emptyDir: {}
+        - name:  {{ include "common.fullname" . }}-logs
+          emptyDir: {}
+      {{- if .Values.global.aafEnabled }}
+        - name:  {{ include "common.fullname" . }}-aaf-props-pvc
+          emptyDir: {}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: {{ include "common.fullname" . }}-spool-data-pvc
+      labels:
+        name: {{ include "common.fullname" . }}
+    spec:
+      accessModes: [ {{ .Values.persistence.accessMode }} ]
+      storageClassName: {{ include "common.fullname" . }}-spool-data-stcl
+      resources:
+        requests:
+          storage: {{ .Values.persistence.spoolSize }}
+      selector:
+        matchLabels:
+          name: {{ include "common.fullname" . }}-spool-data-pv
+  - metadata:
+      name: {{ include "common.fullname" . }}-event-logs-pvc
+      labels:
+        name: {{ include "common.fullname" . }}
+    spec:
+      accessModes: [ {{ .Values.persistence.accessMode }} ]
+      storageClassName: {{ include "common.fullname" . }}-event-logs-stcl
+      resources:
+        requests:
+          storage: {{ .Values.persistence.eventLogSize }}
+      selector:
+        matchLabels:
+          name: {{ include "common.fullname" . }}-event-logs-pv
+{{- if .Values.global.aafEnabled }}
+  - metadata:
+      name: {{ include "common.fullname" . }}-aaf-props-pvc
+      labels:
+        name: {{ include "common.fullname" . }}
+    spec:
+      accessModes: [ {{ .Values.persistence.accessMode }} ]
+      storageClassName: {{ include "common.fullname" . }}-aaf-props-stcl
+      resources:
+        requests:
+          storage: {{ .Values.persistence.aafCredsSize }}
+      selector:
+        matchLabels:
+          name: {{ include "common.fullname" . }}-aaf-props-pv
+{{- end }}
